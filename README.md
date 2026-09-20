@@ -23,7 +23,7 @@ cmake --build . --config Release
 raytracer.exe    # Windows
 ```
 
-- **WASD**: 이동
-- **마우스 우클릭 드래그**: 시선 회전
-- **ESC**: 종료
+- WASD: 이동
+- 마우스 우클릭 드래그: 시선 회전
+- ESC: 종료
 
