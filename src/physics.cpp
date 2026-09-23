@@ -1,98 +1,95 @@
 #include "physics.h"
-#include "constants.h"
-#include <cmath>
 #include <algorithm>
 
-Ball::Ball(Vector3 p, double r, Color c, double orbitR, double dir)
-    : pos(p), vel(0, 0, 0), radius(r), color(c), orbitRadius(orbitR), orbitDir(dir) {}
+RigidBody::RigidBody(Vector3 pos, double r, double m, Color c, double restitution_, double friction_)
+    : position(pos), velocity(0, 0, 0), radius(r), mass(m), restitution(restitution_), friction(friction_), color(c) {}
 
-World::World() {
-    spawn(2.2, 0.0, 0.4, 0.35, { 255, 60, 60 }, 1);
-    spawn(2.4, 1.3, 0.1, 0.3, { 40, 180, 255 }, -1);
-    spawn(2.8, 2.6, -0.3, 0.3, { 60, 220, 90 }, 1);
-    spawn(2.0, 3.9, 0.2, 0.25, { 200, 80, 255 }, -1);
-    spawn(3.0, 5.2, -0.15, 0.28, { 255, 200, 50 }, 1);
+void PhysicsEngine::addBody(RigidBody body) {
+    bodies_.push_back(body);
+    initialBodies_.push_back(body);
 }
 
-void World::update(double dt) {
-    orbit(dt);
-    for (auto& b : balls_) b.pos = b.pos + b.vel * dt;
-    collide();
+void PhysicsEngine::addPlane(const StaticPlane& plane) {
+    planes_.push_back(plane);
 }
 
-void World::spawn(double orbitR, double angle, double h, double r, Color c, double dir) {
-    Vector3 p = kArenaCenter + Vector3(orbitR * std::cos(angle), h, orbitR * std::sin(angle));
-    balls_.emplace_back(p, r, c, orbitR, dir);
+void PhysicsEngine::reset() {
+    bodies_ = initialBodies_;
 }
 
-void World::orbit(double dt) {
-    static const Vector3 up(0, 1, 0);
-    for (auto& b : balls_) {
-        Vector3 toCenter = kArenaCenter - b.pos;
-        double dist = toCenter.length();
-        if (dist < 1e-4) continue;
+void PhysicsEngine::step(double dt) {
+    applyGravity(dt);
+    integrate(dt);
+    resolveCollisions(dt);
+}
 
-        Vector3 radial = toCenter / dist;
-        double err = dist - b.orbitRadius;
-        // 반경으로 되돌리는 스프링 힘 + 계속 돌게 만드는 접선 힘
-        Vector3 spring = radial * (4.0 * err);
-        Vector3 tangent = up.cross(radial).normalized() * b.orbitDir * 2.5;
-
-        b.vel = b.vel + (spring + tangent) * dt;
-        b.vel = b.vel * std::max(0.0, 1.0 - 0.3 * dt);
+void PhysicsEngine::applyGravity(double dt) {
+    for (auto& b : bodies_) {
+        if (b.invMass() <= 0.0) continue;
+        b.velocity = b.velocity + gravity * dt;
     }
 }
 
-void World::collide() {
-    for (size_t i = 0; i < balls_.size(); i++)
-        for (size_t j = i + 1; j < balls_.size(); j++)
-            collidePair(balls_[i], balls_[j]);
-
-    for (auto& b : balls_) {
-        collideStatic(b, kArenaCenter, kArenaRadius);
-        collidePlane(b, kFloorY, 1.0);
-        collidePlane(b, kCeilingY, -1.0);
-    }
+void PhysicsEngine::integrate(double dt) {
+    for (auto& b : bodies_) b.position = b.position + b.velocity * dt;
 }
 
-void World::collidePair(Ball& a, Ball& b) {
-    Vector3 delta = b.pos - a.pos;
+void PhysicsEngine::resolveCollisions(double dt) {
+    for (size_t i = 0; i < bodies_.size(); i++)
+        for (size_t j = i + 1; j < bodies_.size(); j++)
+            resolveBodyPair(bodies_[i], bodies_[j]);
+
+    for (auto& b : bodies_)
+        for (auto& p : planes_)
+            resolvePlaneContact(b, p, dt);
+}
+
+void PhysicsEngine::resolvePlaneContact(RigidBody& body, const StaticPlane& plane, double dt) {
+    double dist = (body.position - plane.point).dot(plane.normal);
+    double penetration = body.radius - dist;
+    if (penetration <= 0.0) return;
+
+    body.position = body.position + plane.normal * penetration;
+
+    double vn = body.velocity.dot(plane.normal);
+    Vector3 normalVel = plane.normal * vn;
+    Vector3 tangentVel = body.velocity - normalVel;
+
+    if (vn < 0.0) {
+        double restitution = std::min(body.restitution, plane.restitution);
+        normalVel = normalVel * -restitution;
+    }
+
+    // 접촉 중인 동안 접선 속도를 감쇠 (단순화된 운동마찰 모델)
+    double frictionCoeff = std::max(body.friction, plane.friction);
+    double frictionFactor = std::clamp(1.0 - frictionCoeff * dt * 12.0, 0.0, 1.0);
+    tangentVel = tangentVel * frictionFactor;
+
+    body.velocity = normalVel + tangentVel;
+}
+
+void PhysicsEngine::resolveBodyPair(RigidBody& a, RigidBody& b) {
+    Vector3 delta = b.position - a.position;
     double dist = delta.length();
     double minDist = a.radius + b.radius;
     if (dist >= minDist || dist < 1e-6) return;
 
+    double invA = a.invMass(), invB = b.invMass();
+    double totalInv = invA + invB;
+    if (totalInv <= 0.0) return;
+
     Vector3 n = delta / dist;
     double overlap = minDist - dist;
-    a.pos = a.pos - n * (overlap * 0.5);
-    b.pos = b.pos + n * (overlap * 0.5);
+    a.position = a.position - n * (overlap * invA / totalInv);
+    b.position = b.position + n * (overlap * invB / totalInv);
 
-    double vn = (b.vel - a.vel).dot(n);
-    if (vn > 0) return;
+    double vn = (b.velocity - a.velocity).dot(n);
+    if (vn > 0.0) return;
 
-    Vector3 impulse = n * (-(1.0 + kRestitution) * vn / 2.0);
-    a.vel = a.vel - impulse;
-    b.vel = b.vel + impulse;
-}
+    double restitution = std::min(a.restitution, b.restitution);
+    double impulseMag = -(1.0 + restitution) * vn / totalInv;
+    Vector3 impulse = n * impulseMag;
 
-void World::collideStatic(Ball& b, const Vector3& center, double r) {
-    Vector3 delta = b.pos - center;
-    double dist = delta.length();
-    double minDist = b.radius + r;
-    if (dist >= minDist || dist < 1e-6) return;
-
-    Vector3 n = delta / dist;
-    b.pos = b.pos + n * (minDist - dist);
-
-    double vn = b.vel.dot(n);
-    if (vn < 0) b.vel = b.vel - n * (vn * (1.0 + kRestitution));
-}
-
-void World::collidePlane(Ball& b, double planeY, double dir) {
-    double d = dir * (b.pos.y - planeY);
-    double pen = b.radius - d;
-    if (pen <= 0) return;
-
-    b.pos.y += dir * pen;
-    double vn = dir * b.vel.y;
-    if (vn < 0) b.vel.y -= dir * vn * (1.0 + kRestitution);
+    a.velocity = a.velocity - impulse * invA;
+    b.velocity = b.velocity + impulse * invB;
 }

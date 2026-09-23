@@ -2,6 +2,7 @@
 #include "constants.h"
 #include "sphere.h"
 #include "plane.h"
+#include "quad.h"
 #include <cmath>
 #include <algorithm>
 #include <limits>
@@ -11,7 +12,7 @@ void Scene::addLight(Light l) { lights_.push_back(l); }
 void Scene::setTime(double t) { time_ = t; }
 
 Color Scene::trace(const Ray& ray, int depth) const {
-    if (depth > 2) return sky(ray);
+    if (depth > 1) return sky(ray); // 반사 깊이 1단계로 제한 (기존 2단계에서 축소)
 
     double closestT = std::numeric_limits<double>::max();
     const Hittable* hit = nullptr;
@@ -107,18 +108,22 @@ double Scene::fresnel(double base, double cosTheta) {
     return base + (1.0 - base) * f;
 }
 
-Scene buildScene(double time, const World& world) {
+Scene buildScene(double time, const PhysicsEngine& engine) {
     Scene scene;
 
-    scene.add(std::make_unique<Sphere>(kArenaCenter, kArenaRadius, Material{ { 235, 235, 240 }, 0.55 }));
-    scene.add(std::make_unique<Plane>(kFloorY, Color(205, 205, 210), Color(25, 25, 32), 0.25, Vector3(0, 1, 0)));
-    scene.add(std::make_unique<Plane>(kCeilingY, Color(50, 50, 62), Color(30, 30, 38), 0.1, Vector3(0, -1, 0)));
+    scene.add(std::make_unique<Plane>(kFloorY, Color(205, 205, 210), Color(25, 25, 32), 0.15, Vector3(0, 1, 0)));
 
-    for (auto& ball : world.balls())
-        scene.add(std::make_unique<Sphere>(ball.pos, ball.radius, Material{ ball.color, 0.15 }));
+    // 경사로(램프) 시각화 — 물리 충돌 평면(constants.h)과 정확히 같은 위치/각도
+    Vector3 rampCenter = kRampBase + kRampSlopeDir * (kRampLength * 0.5);
+    Vector3 rampWidthDir(0.0, 0.0, 1.0);
+    scene.add(std::make_unique<Quad>(rampCenter, kRampSlopeDir, kRampLength * 0.5, rampWidthDir, kRampWidth * 0.5,
+                                      Color(150, 120, 90), 0.05));
 
-    scene.addLight({ { 3, 5, -4 }, { 1.0, 0.95, 0.85 }, 1.0 });
-    scene.addLight({ { -4, 2.5, -1.5 }, { 0.4, 0.55, 1.0 }, 0.55 });
+    for (const auto& body : engine.bodies())
+        scene.add(std::make_unique<Sphere>(body.position, body.radius, Material{ body.color, 0.2 }));
+
+    scene.addLight({ { 3, 5, -2 }, { 1.0, 0.95, 0.85 }, 1.0 });
+    scene.addLight({ { -3, 3, 3 }, { 0.4, 0.55, 1.0 }, 0.5 });
 
     scene.setTime(time);
     return scene;

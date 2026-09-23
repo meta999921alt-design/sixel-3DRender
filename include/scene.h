@@ -25,4 +25,4 @@ private:
     double time_ = 0;
 };
 
-Scene buildScene(double time, const World& world);
+Scene buildScene(double time, const PhysicsEngine& engine);

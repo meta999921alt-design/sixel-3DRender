@@ -1,72 +1,83 @@
 #include "app.h"
 #include "scene.h"
-#include "platform.h"
-#include <iostream>
+#include "constants.h"
 #include <algorithm>
 #include <thread>
-#include <filesystem>
+#include <cmath>
+
+namespace {
+PhysicsEngine buildPhysics() {
+    PhysicsEngine engine;
+    engine.addPlane({ Vector3(0, kFloorY, 0), Vector3(0, 1, 0), 0.25, 0.5 });
+    engine.addPlane({ kRampBase, kRampNormal, 0.15, 0.15 });
+
+    Vector3 spawn = kRampBase + kRampSlopeDir * (kRampLength * 0.85) + Vector3(0, 0.8, 0);
+    engine.addBody(RigidBody(spawn, 0.4, 1.0, Color(220, 70, 70), 0.35, 0.2));
+    return engine;
+}
+}
 
 App::App()
     : threads_(std::max(1u, std::thread::hardware_concurrency())),
       pool_(threads_),
-      perfLog_(logPath(), std::ios::app),
-      res_(pickResolution()),
-      w_(res_.first),
-      h_(res_.second),
+      w_(kWindowWidth),
+      h_(kWindowHeight),
+      window_(w_, h_, "Physics Demo"),
       camera_(w_, h_),
-      encoder_(std::make_unique<Encoder>(w_, (int)threads_)),
-      idx_(h_, std::vector<uint8_t>(w_, 0))
+      physics_(buildPhysics()),
+      pixels_((size_t)w_ * h_, 0)
 {
-    std::cout << "\x1b[2J\x1b[?25l";
-    std::cerr << "[DIAG] perf log path: " << logPath() << "\n";
-    if (!perfLog_.is_open()) std::cerr << "[DIAG] failed to open perf.log\n";
-    perfLog_ << "run start: " << w_ << "x" << h_ << ", threads=" << threads_ << "\n";
-    perfLog_.flush();
-    std::cerr << "[DIAG] WASD to move, right-drag mouse to look, ESC to quit\n";
 }
-
-App::~App() { std::cout << "\x1b[?25h"; }
 
 void App::run() {
     double t = 0;
     int frameNo = 0;
     const std::chrono::microseconds targetDt(10000);
     auto prevTime = clock::now();
+    auto fpsTimer = clock::now();
+    double renderMsAccum = 0, presentMsAccum = 0;
 
     while (true) {
         auto start = clock::now();
         double dt = std::clamp(std::chrono::duration<double>(start - prevTime).count(), 0.0, 0.1);
         prevTime = start;
 
-        auto in = input_.poll();
+        auto in = window_.poll();
         if (in.quit) break;
         camera_.rotate(in.yawDelta, in.pitchDelta);
         camera_.move(in.fwd * 3.0 * dt, in.right * 3.0 * dt);
+        if (in.reset) physics_.reset();
 
-        world_.update(dt);
+        physics_.step(dt);
 
-        Scene scene = buildScene(t, world_);
+        Scene scene = buildScene(t, physics_);
         render(scene);
-        auto tTrace = clock::now();
+        auto afterRender = clock::now();
 
-        std::string frame = encoder_->encode(idx_, w_, h_, palette_.declaration(), pool_);
-        auto tEncode = clock::now();
+        window_.present(pixels_);
+        auto afterPresent = clock::now();
 
-        present(frame);
-        auto tIo = clock::now();
-
-        frameNo++;
-        if (frameNo == 1 || frameNo % 30 == 0) {
-            double a = ms(start, tTrace), b = ms(tTrace, tEncode), c = ms(tEncode, tIo);
-            double total = a + b + c;
-            perfLog_ << "frame " << frameNo << " | trace=" << a << "ms encode=" << b << "ms io=" << c
-                     << "ms | total=" << total << "ms (~" << (1000.0 / total) << " fps)\n";
-            perfLog_.flush();
-            if (frameNo == 1) std::cerr << "[DIAG] first frame done: " << total << "ms\n";
-        }
+        renderMsAccum += ms(start, afterRender);
+        presentMsAccum += ms(afterRender, afterPresent);
 
         t += 0.03;
-        auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(tIo - start);
+        frameNo++;
+        if (frameNo % 30 == 0) {
+            double secs = std::chrono::duration<double>(clock::now() - fpsTimer).count();
+            fpsTimer = clock::now();
+            double fps = secs > 0 ? 30.0 / secs : 0.0;
+            double avgRender = renderMsAccum / 30.0;
+            double avgPresent = presentMsAccum / 30.0;
+            renderMsAccum = 0;
+            presentMsAccum = 0;
+            window_.setTitle(
+                "Physics Demo - " + std::to_string((int)fps) + " fps | render " +
+                std::to_string((int)avgRender) + "ms present " + std::to_string((int)avgPresent) +
+                "ms | R to reset ball"
+            );
+        }
+
+        auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(clock::now() - start);
         if (elapsed < targetDt) std::this_thread::sleep_for(targetDt - elapsed);
     }
 }
@@ -77,30 +88,17 @@ double App::ms(clock::time_point a, clock::time_point b) {
 
 void App::render(const Scene& scene) {
     unsigned n = threads_;
+    std::vector<int> rowStart(n + 1);
+    for (unsigned i = 0; i <= n; i++) rowStart[i] = (int)((long long)h_ * i / n);
+
     pool_.parallelFor([&](unsigned t) {
-        for (int y = t; y < h_; y += n)
+        for (int y = rowStart[t]; y < rowStart[t + 1]; y++)
             for (int x = 0; x < w_; x++) {
-                Color c = scene.trace(camera_.rayForPixel(x, y), 0);
-                idx_[y][x] = palette_.quantize(c, x, y);
+                Color c = scene.trace(camera_.rayForPixel(x, y), 0).clamped();
+                uint32_t r = (uint32_t)std::lround(c.r);
+                uint32_t g = (uint32_t)std::lround(c.g);
+                uint32_t b = (uint32_t)std::lround(c.b);
+                pixels_[(size_t)y * w_ + x] = (r << 16) | (g << 8) | b;
             }
     });
-}
-
-void App::present(const std::string& frame) {
-    std::cout << "\x1b[H";
-    std::cout.write(frame.c_str(), (std::streamsize)frame.size());
-    std::cout << "\x1b[0J";
-    std::cout.flush();
-}
-
-std::pair<int, int> App::pickResolution() {
-    consoleInit();
-    int w, h;
-    guessResolution(1920, 1080, w, h);
-    return { w, h };
-}
-
-std::string App::logPath() {
-    try { return std::filesystem::absolute("perf.log").string(); }
-    catch (...) { return "perf.log"; }
 }
