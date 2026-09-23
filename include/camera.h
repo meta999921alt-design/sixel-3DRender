@@ -14,10 +14,10 @@ public:
     Ray rayForPixel(int x, int y) const;
 
 private:
-    void updateTrig();
+    static Vector3 pitchIt(Vector3 v, double p);
+    static Vector3 yawIt(Vector3 v, double yaw);
 
     int w_, h_;
     Vector3 pos_{ 0, 0, 0 };
     double yaw_ = 0, pitch_ = 0;
-    double cosYaw_ = 1, sinYaw_ = 0, cosPitch_ = 1, sinPitch_ = 0;
 };
